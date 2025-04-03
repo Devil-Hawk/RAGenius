@@ -172,21 +172,29 @@ def process_uploaded_files(uploaded_files, client):
 def check_and_handle_meta_question(current_input):
     """Checks for meta questions about document count and returns an answer if matched, else None."""
     normalized_input = current_input.lower().strip().replace("?", "")
-    is_count_query = (
-        ("how many" in normalized_input or "count" in normalized_input) 
-        and ("document" in normalized_input 
-            or "file" in normalized_input 
-            or "pdf" in normalized_input
-            )
+    # Break down boolean logic for clarity and formatting
+    has_count_keyword = "how many" in normalized_input or "count" in normalized_input
+    has_object_keyword = (
+        "document" in normalized_input
+        or "file" in normalized_input
+        or "pdf" in normalized_input
     )
+    is_count_query = has_count_keyword and has_object_keyword
+
     if is_count_query:
         if "documents" in st.session_state and st.session_state.documents:
-            unique_filenames = set(filename for _, _, filename in st.session_state.documents)
+            unique_filenames = set(
+                filename for _, _, filename in st.session_state.documents
+            )
             num_docs = len(unique_filenames)
-            return f"You have successfully processed {num_docs} unique document(s):\n" + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
+            return (
+                f"You have successfully processed {num_docs} unique document(s):\n"
+                + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
+            )
         else:
             return "No documents have been successfully processed yet."
     return None
+
 
 def retrieve_and_format_context(query_embedding):
     """Searches the index and formats the context string with source labels."""
@@ -200,17 +208,18 @@ def retrieve_and_format_context(query_embedding):
         for i, idx in enumerate(indices[0]):
             if 0 <= idx < len(st.session_state.documents):
                 chunk_text, _, doc_filename = st.session_state.documents[idx]
-                context += (
-                    f"--- Context from '{doc_filename}': ---\n{chunk_text}\n\n"
-                )
+                context += f"--- Context from '{doc_filename}': ---\n{chunk_text}\n\n"
                 valid_indices_found += 1
             else:
                 st.warning(f"Invalid index {idx} found at search result position {i}.")
-    
+
     if valid_indices_found == 0:
-        st.warning("Could not find relevant context in the uploaded documents for your query.")
-        return "No relevant context could be retrieved." # Return fallback context
+        st.warning(
+            "Could not find relevant context in the uploaded documents for your query."
+        )
+        return "No relevant context could be retrieved."  # Return fallback context
     return context
+
 
 def send_message():
     # Add verbose state check at the beginning
@@ -245,32 +254,33 @@ def send_message():
         return
 
     # Capture input from session state
-    current_input = st.session_state.input_text 
+    current_input = st.session_state.input_text
 
     # Append the user message to the chat history
     user_message = {"role": "user", "text": current_input}
     st.session_state.chat_history.append(user_message)
 
-    # --- Handle Meta Question --- 
+    # --- Handle Meta Question ---
     meta_answer = check_and_handle_meta_question(current_input)
     if meta_answer:
         st.session_state.chat_history.append({"role": "assistant", "text": meta_answer})
         st.rerun()
-        return # Exit early
+        return  # Exit early
     # --- End Meta Question Handling ---
 
     try:
-        # --- Retrieve and Format Context --- 
+        # --- Retrieve and Format Context ---
         query_embedding = get_embedding(current_input)
         context = retrieve_and_format_context(query_embedding)
-        # --- End Context Retrieval --- 
+        # --- End Context Retrieval ---
 
         # Construct the prompt
         prompt = (
-            f"You are comparing information from different documents based *only* on the context provided below. "
-            f"Each context snippet is marked with '--- Context from 'filename': ---'. "
-            f"Answer the user's question based *only* on this structured context. "
-            f"If the context doesn't contain enough information to answer, say so clearly.\n\n"
+            "You are comparing information from different documents based *only* on the "
+            "context provided below. Each context snippet is marked with "
+            "'--- Context from 'filename': ---'. Answer the user's question based "
+            "*only* on this structured context. If the context doesn't contain enough "
+            "information to answer, say so clearly.\n\n"
             f"Structured Context:\n{context}"
             f"\n---\nUser Question: {current_input}\nAnswer:"
         )
@@ -285,8 +295,8 @@ def send_message():
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=250,  # Increased slightly
-            temperature=0.1,  # Slightly lower temp
+            max_tokens=250,
+            temperature=0.1,
         )
         answer = response.choices[0].message.content.strip()
         st.session_state.chat_history.append({"role": "assistant", "text": answer})

@@ -28,7 +28,8 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 . --count --max-line-length=127 --max-complexity=15 --ignore=E501 --statistics
+          # Combine checks: max-line-length=127, ignore E501 & W503, check complexity (max 15), exclude node_modules
+          flake8 . --count --max-line-length=127 --max-complexity=15 --ignore=E501,W503 --exclude=node_modules,__pycache__,.git,.venv,venv,ENV,env --statistics
 
       - name: Check formatting with black
         run: |
