@@ -38,6 +38,8 @@ jobs:
       - name: Run tests
         run: |
           if [ -d "rag-backend/tests" ]; then
+            # Set PYTHONPATH to the root directory for correct imports
+            export PYTHONPATH="$PYTHONPATH:."
             pytest rag-backend/tests
           else
             echo "No backend tests found, skipping."
