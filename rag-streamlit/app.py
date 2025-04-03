@@ -1,10 +1,12 @@
 import streamlit as st
 import openai
+from openai import OpenAI
 import faiss
 import numpy as np
 import io
 import toml
 from PyPDF2 import PdfReader
+import os
 
 # -------------------------------
 # Configuration & Secrets
@@ -12,12 +14,19 @@ from PyPDF2 import PdfReader
 
 st.set_page_config(page_title="PDF IQ Chat", layout="wide")
 
-# Load the API key from Streamlit secrets (set via the Secrets tab on Streamlit Cloud)
+# Load the API key from Streamlit secrets and initialize OpenAI client
 try:
-    openai.api_key = st.secrets["openai"]["api_key"]
+    api_key = st.secrets["openai"]["api_key"]
+    
+    # Initialize OpenAI client directly with the key
+    client = OpenAI(api_key=api_key)
+
+except KeyError:
+    st.error("OpenAI API key not found in Streamlit secrets. Please add it via the Streamlit Cloud interface.")
+    client = None
 except Exception as e:
-    st.error("API key not found in secrets. Please add it to your Streamlit Cloud Secrets.")
-    openai.api_key = None
+    st.error(f"Error initializing OpenAI client from secrets: {str(e)}")
+    client = None
 
 # -------------------------------
 # Session State Initialization
@@ -39,11 +48,11 @@ if "input_text" not in st.session_state:
 
 def get_embedding(text: str) -> np.ndarray:
     """Call OpenAI's Embedding API to get an embedding for the provided text."""
-    response = openai.Embedding.create(
+    response = client.embeddings.create(
         input=text,
         model="text-embedding-ada-002"
     )
-    embedding = response["data"][0]["embedding"]
+    embedding = response.data[0].embedding
     return np.array(embedding, dtype=np.float32)
 
 def extract_text(file) -> str:
@@ -125,7 +134,7 @@ def send_message():
     
     try:
         # Call OpenAI's ChatCompletion API
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -158,3 +167,4 @@ for msg in st.session_state.chat_history:
             f"<div style='text-align: left; color: lightgreen;'><strong>Assistant:</strong> {msg['text']}</div>",
             unsafe_allow_html=True
         )
+    
