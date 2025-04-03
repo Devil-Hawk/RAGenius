@@ -87,11 +87,6 @@ def extract_text(file) -> str:
     return text
 
 
-# -------------------------------
-# Chunking Function
-# -------------------------------
-
-
 def chunk_text(
     text: str, chunk_size: int = 1000, chunk_overlap: int = 150
 ) -> list[str]:
@@ -115,6 +110,66 @@ def chunk_text(
     return [chunk for chunk in chunks if chunk.strip()]  # Remove empty chunks
 
 
+def process_uploaded_files(uploaded_files, client):
+    """Handles text extraction, chunking, embedding, and indexing for uploaded files."""
+    if not uploaded_files:
+        st.error("No files selected for upload.")
+        return None, None  # Return None if no files
+
+    if client is None:
+        st.error("OpenAI client not initialized. Check secrets configuration.")
+        return None, None  # Return None if client bad
+
+    new_documents: list[tuple[str, np.ndarray, str]] = []
+    embedding_dim = 1536
+    current_batch_index = faiss.IndexFlatL2(embedding_dim)
+    processing_error = False
+    files_processed_count = 0
+    chunks_processed_count = 0
+
+    with st.spinner("Extracting text from documents..."):
+        all_chunks_with_source: list[tuple[str, str]] = []
+        for file in uploaded_files:
+            full_text = extract_text(file)
+            if full_text:
+                file_chunks = chunk_text(full_text)
+                for chunk in file_chunks:
+                    all_chunks_with_source.append((chunk, file.name))
+                files_processed_count += 1
+            else:
+                st.warning(
+                    f"Skipping file {file.name} due to text extraction issues.",
+                    icon="⚠️",
+                )
+
+        if not all_chunks_with_source:
+            st.error("No text could be extracted or chunked from the selected files.")
+            return None, None  # Return None if no chunks
+
+    if all_chunks_with_source:
+        with st.spinner("Indexing documents..."):
+            try:
+                for i, (chunk, filename) in enumerate(all_chunks_with_source):
+                    embedding = get_embedding(chunk)
+                    new_documents.append((chunk, embedding, filename))
+                    current_batch_index.add(np.expand_dims(embedding, axis=0))
+                    chunks_processed_count += 1
+
+                st.success(
+                    f"Successfully processed {files_processed_count} file(s) "
+                    f"({chunks_processed_count} sections indexed). Ready for questions!",
+                    icon="✅",
+                )
+                return new_documents, current_batch_index  # Return successful results
+
+            except Exception as e:
+                st.error(f"Error during document processing: {str(e)}", icon="🚨")
+                return None, None  # Return None on error
+    else:
+        st.warning("No text could be processed from the uploaded files.", icon="⚠️")
+        return None, None  # Return None if no chunks processed
+
+
 # -------------------------------
 # UI: File Upload Section
 # -------------------------------
@@ -124,85 +179,23 @@ st.markdown("### Upload your Documents")
 st.markdown("*(Upload PDFs or text files. The content will be indexed for chat.)*")
 
 uploaded_files = st.file_uploader(
-    "Select files", type=["pdf", "txt"], accept_multiple_files=True
+    "Select files", type=["pdf", "txt"], accept_multiple_files=True, key="file_uploader"
 )
 
-if st.button("Upload Files", disabled=st.session_state.processing_upload):
-    if not uploaded_files:
-        st.error("No files selected for upload.")
-    else:
-        if client is None:
-            st.error("OpenAI client not initialized. Check secrets configuration.")
-        else:
-            st.session_state.processing_upload = True  # Disable button
-            # Store tuples of (chunk_text, embedding, source_filename)
-            new_documents: list[tuple[str, np.ndarray, str]] = []
-            embedding_dim = 1536
-            current_batch_index = faiss.IndexFlatL2(embedding_dim)
-            processing_error = False
-            files_processed_count = 0
-            chunks_processed_count = 0
-
-            with st.spinner("Extracting text from documents..."):
-                all_chunks_with_source: list[tuple[str, str]] = []  # (chunk, filename)
-                for file in uploaded_files:
-                    # st.write(f"Extracting text from {file.name}...") # Hide this line
-                    full_text = extract_text(file)
-                    if full_text:
-                        file_chunks = chunk_text(full_text)
-                        for chunk in file_chunks:
-                            all_chunks_with_source.append((chunk, file.name))
-                        files_processed_count += 1
-                    else:
-                        st.warning(
-                            f"Skipping file {file.name} due to text extraction issues.",
-                            icon="⚠️",
-                        )
-
-                if not all_chunks_with_source:
-                    st.error(
-                        "No text could be extracted or chunked from the selected files."
-                    )
-                    processing_error = True
-                # else:
-                # st.write(f"Generated {len(all_chunks_with_source)} text chunks from {files_processed_count} file(s).") # Hide this line
-
-            if not processing_error and all_chunks_with_source:
-                # Use a single, generic spinner message for the embedding process
-                with st.spinner(f"Indexing documents..."):
-                    try:
-                        # Embed and index each chunk, storing source filename
-                        for i, (chunk, filename) in enumerate(all_chunks_with_source):
-                            embedding = get_embedding(chunk)
-                            new_documents.append((chunk, embedding, filename))
-                            current_batch_index.add(np.expand_dims(embedding, axis=0))
-                            chunks_processed_count += 1
-
-                        st.success(
-                            f"Successfully processed {files_processed_count} file(s) ({chunks_processed_count} sections indexed). Ready for questions!",
-                            icon="✅",
-                        )
-                        # REPLACE existing state only on full success
-                        st.session_state.documents = new_documents
-                        st.session_state.faiss_index = current_batch_index
-                        st.session_state.chat_history = []
-
-                    except Exception as e:
-                        st.error(
-                            f"Error during document processing: {str(e)}", icon="🚨"
-                        )
-                        processing_error = True
-
-            elif not all_chunks_with_source and not processing_error:
-                st.warning(
-                    "No text could be processed from the uploaded files.", icon="⚠️"
-                )
-                processing_error = True
-
-            # Re-enable button regardless of outcome
-            st.session_state.processing_upload = False
-            # Rerun to clear spinners and update UI state cleanly
-            st.rerun()
+if st.button(
+    "Upload Files",
+    key="upload_button",
+    disabled=st.session_state.get("processing_upload", False),
+):
+    st.session_state.processing_upload = True
+    new_docs, new_index = process_uploaded_files(uploaded_files, client)
+    # Only update state if processing was successful
+    if new_docs is not None and new_index is not None:
+        st.session_state.documents = new_docs
+        st.session_state.faiss_index = new_index
+        st.session_state.chat_history = []  # Clear history on new upload
+    st.session_state.processing_upload = False
+    st.rerun()
 
 st.markdown("---")
 st.markdown("### Chat with Your Documents")
@@ -252,27 +245,26 @@ def send_message():
     user_message = {"role": "user", "text": current_input}
     st.session_state.chat_history.append(user_message)
 
-    # --- Add Check for Meta Question ---
-    normalized_input = current_input.lower().strip()
-    if (
-        normalized_input.startswith("how many document")
-        or normalized_input.startswith("count document")
-        or normalized_input.startswith("how many file")
-    ):
+    # --- Add Check for Meta Question --- 
+    normalized_input = current_input.lower().strip().replace("?", "") # Normalize
+    # Check for keywords instead of just startswith
+    is_count_query = (
+        ("how many" in normalized_input or "count" in normalized_input) and 
+        ("document" in normalized_input or "file" in normalized_input or "pdf" in normalized_input)
+    )
+
+    if is_count_query:
         if "documents" in st.session_state and st.session_state.documents:
             # Calculate unique filenames
-            unique_filenames = set(
-                filename for _, _, filename in st.session_state.documents
-            )
+            unique_filenames = set(filename for _, _, filename in st.session_state.documents)
             num_docs = len(unique_filenames)
-            answer = f"You have uploaded {num_docs} unique document(s):\n" + "\n".join(
-                f"- {name}" for name in sorted(list(unique_filenames))
-            )
+            answer = f"You have successfully processed {num_docs} unique document(s):\n" + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
         else:
             answer = "No documents have been successfully processed yet."
-
+        
         st.session_state.chat_history.append({"role": "assistant", "text": answer})
-        return  # <<-- Exit early, skip RAG
+        st.rerun() # Rerun to update the chat display immediately
+        # return # No longer strictly needed due to rerun, but good practice
     # --- End Check for Meta Question ---
 
     try:

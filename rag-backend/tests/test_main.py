@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from main import app
+
 # import pytest  # F401 - Keep commented or remove if truly unused
 
 client = TestClient(app)
@@ -21,4 +22,4 @@ def test_rate_limiting():
     for _ in range(3):
         response = client.post("/ask", data={"question": "test question"})
     assert response.status_code == 429
-    assert "Too many requests" in response.json()["detail"] 
+    assert "Too many requests" in response.json()["detail"]

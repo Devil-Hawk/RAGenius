@@ -6,6 +6,7 @@ from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 # import openai  # F401 - Keep commented or remove if truly unused
 from openai import OpenAI
 import faiss
@@ -37,7 +38,9 @@ app.add_middleware(
 #         ├── app.py
 #         └── .streamlit\
 #               └── secrets.toml
-secrets_path = os.path.join(os.path.dirname(__file__), "..", "rag-streamlit", ".streamlit", "secrets.toml")
+secrets_path = os.path.join(
+    os.path.dirname(__file__), "..", "rag-streamlit", ".streamlit", "secrets.toml"
+)
 secrets_data = toml.load(secrets_path)
 api_key = secrets_data["openai"]["api_key"]
 
@@ -54,18 +57,17 @@ documents = []  # List of tuples: (text, embedding)
 embedding_dim = 1536  # For text-embedding-ada-002
 index = faiss.IndexFlatL2(embedding_dim)
 
+
 def get_embedding(text: str) -> np.ndarray:
     """Generate an embedding for the given text using OpenAI's API."""
     try:
-        response = client.embeddings.create(
-            input=text,
-            model="text-embedding-ada-002"
-        )
+        response = client.embeddings.create(input=text, model="text-embedding-ada-002")
         embedding = response.data[0].embedding
         return np.array(embedding, dtype=np.float32)
     except Exception as e:
         logger.error(f"Error generating embedding: {str(e)}")
         raise
+
 
 @app.post("/upload")
 async def upload_files(files: List[UploadFile] = File(...)):
@@ -84,7 +86,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
                         text += extracted + "\n"
             else:
                 text = content.decode("utf-8")
-            
+
             # Generate embedding and store document
             embedding = get_embedding(text)
             documents.append((text, embedding))
@@ -93,14 +95,18 @@ async def upload_files(files: List[UploadFile] = File(...)):
             logger.info(f"Successfully processed file: {file.filename}")
         except Exception as e:
             logger.error(f"Error processing file {file.filename}: {str(e)}")
-            results.append({"filename": file.filename, "status": "error", "error": str(e)})
+            results.append(
+                {"filename": file.filename, "status": "error", "error": str(e)}
+            )
     return {"files": results}
+
 
 # Rate limiting configuration
 RATE_LIMIT_SECONDS = 2  # Minimum seconds between requests per IP
 MAX_CONVERSATIONS_PER_IP = 20  # Maximum total conversations allowed per IP
-ip_last_request = {}       # To store the timestamp of the last request per IP
-ip_conversation_count = {} # To count total conversations per IP
+ip_last_request = {}  # To store the timestamp of the last request per IP
+ip_conversation_count = {}  # To count total conversations per IP
+
 
 @app.post("/ask")
 async def ask_question(request: Request, question: str = Form(...)):
@@ -112,19 +118,25 @@ async def ask_question(request: Request, question: str = Form(...)):
     last_request = ip_last_request.get(client_ip, 0)
     if now - last_request < RATE_LIMIT_SECONDS:
         logger.warning(f"Rate limit exceeded for IP {client_ip}")
-        raise HTTPException(status_code=429, detail="Too many requests, please slow down.")
+        raise HTTPException(
+            status_code=429, detail="Too many requests, please slow down."
+        )
     ip_last_request[client_ip] = now
 
     # Increment conversation count for this IP and check against limit.
     ip_conversation_count[client_ip] = ip_conversation_count.get(client_ip, 0) + 1
     if ip_conversation_count[client_ip] > MAX_CONVERSATIONS_PER_IP:
         logger.warning(f"Conversation limit reached for IP {client_ip}")
-        raise HTTPException(status_code=429, detail="Conversation limit reached for this IP.")
+        raise HTTPException(
+            status_code=429, detail="Conversation limit reached for this IP."
+        )
 
     if index.ntotal == 0:
         logger.error("No documents uploaded when attempting to ask a question")
-        return JSONResponse(status_code=400, content={"error": "No documents uploaded."})
-    
+        return JSONResponse(
+            status_code=400, content={"error": "No documents uploaded."}
+        )
+
     # Generate embedding for the question and search for the most relevant documents.
     query_embedding = get_embedding(question)
     k = 3  # Number of documents to retrieve
@@ -145,13 +157,14 @@ async def ask_question(request: Request, question: str = Form(...)):
         model="gpt-3.5-turbo",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ],
         max_tokens=200,
-        temperature=0.2
+        temperature=0.2,
     )
     answer = response.choices[0].message.content.strip()
     return {"answer": answer}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
