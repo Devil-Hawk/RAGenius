@@ -35,6 +35,13 @@ jobs:
         run: |
           black --check .
 
+      - name: Create dummy secrets.toml for testing
+        run: |
+          mkdir -p rag-streamlit/.streamlit
+          echo '[openai]' > rag-streamlit/.streamlit/secrets.toml
+          echo 'api_key = "ci-dummy-key-not-real"' >> rag-streamlit/.streamlit/secrets.toml
+          echo "Dummy secrets.toml created."
+
       - name: Run tests
         run: |
           if [ -d "rag-backend/tests" ]; then
