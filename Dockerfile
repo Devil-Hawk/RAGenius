@@ -21,8 +21,20 @@ RUN pip install --no-cache-dir -r backend-requirements.txt \
 COPY rag-backend /app/backend
 COPY rag-streamlit /app/frontend
 
-# Create a non-root user
+# Create a script to run both services
+COPY <<EOF /app/start.sh
+#!/bin/bash
+cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
+cd /app/frontend && streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+EOF
+
+# Make the script executable (as root)
+RUN chmod +x /app/start.sh
+
+# Create a non-root user and switch to it
 RUN useradd -m myuser
+# Ensure ownership if needed (optional but good practice)
+# RUN chown -R myuser:myuser /app 
 USER myuser
 
 # Set environment variables
@@ -31,14 +43,5 @@ ENV PYTHONPATH=/app
 # Expose ports
 EXPOSE 8000 8501
 
-# Create a script to run both services
-COPY <<EOF /app/start.sh
-#!/bin/bash
-cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
-cd /app/frontend && streamlit run app.py --server.port 8501 --server.address 0.0.0.0
-EOF
-
-RUN chmod +x /app/start.sh
-
-# Command to run the application
+# Command to run the application (as myuser)
 CMD ["/app/start.sh"] 
