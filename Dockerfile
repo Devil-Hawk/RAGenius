@@ -31,10 +31,11 @@ EOF
 # Make the script executable (as root)
 RUN chmod +x /app/start.sh
 
-# Create a non-root user and switch to it
+# Create a non-root user 
 RUN useradd -m myuser
-# Ensure ownership if needed (optional but good practice)
-# RUN chown -R myuser:myuser /app 
+# Change ownership of the app directory to the new user
+RUN chown -R myuser:myuser /app 
+# Switch to the non-root user
 USER myuser
 
 # Set environment variables
