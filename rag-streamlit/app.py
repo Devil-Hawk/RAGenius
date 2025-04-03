@@ -123,7 +123,6 @@ def process_uploaded_files(uploaded_files, client):
     new_documents: list[tuple[str, np.ndarray, str]] = []
     embedding_dim = 1536
     current_batch_index = faiss.IndexFlatL2(embedding_dim)
-    processing_error = False
     files_processed_count = 0
     chunks_processed_count = 0
 
@@ -170,6 +169,135 @@ def process_uploaded_files(uploaded_files, client):
         return None, None  # Return None if no chunks processed
 
 
+def check_and_handle_meta_question(current_input):
+    """Checks for meta questions about document count and returns an answer if matched, else None."""
+    normalized_input = current_input.lower().strip().replace("?", "")
+    is_count_query = (
+        ("how many" in normalized_input or "count" in normalized_input) 
+        and ("document" in normalized_input 
+            or "file" in normalized_input 
+            or "pdf" in normalized_input
+            )
+    )
+    if is_count_query:
+        if "documents" in st.session_state and st.session_state.documents:
+            unique_filenames = set(filename for _, _, filename in st.session_state.documents)
+            num_docs = len(unique_filenames)
+            return f"You have successfully processed {num_docs} unique document(s):\n" + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
+        else:
+            return "No documents have been successfully processed yet."
+    return None
+
+def retrieve_and_format_context(query_embedding):
+    """Searches the index and formats the context string with source labels."""
+    k = min(3, st.session_state.faiss_index.ntotal)
+    distances, indices = st.session_state.faiss_index.search(
+        np.expand_dims(query_embedding, axis=0), k
+    )
+    context = ""
+    valid_indices_found = 0
+    if indices.size > 0:
+        for i, idx in enumerate(indices[0]):
+            if 0 <= idx < len(st.session_state.documents):
+                chunk_text, _, doc_filename = st.session_state.documents[idx]
+                context += (
+                    f"--- Context from '{doc_filename}': ---\n{chunk_text}\n\n"
+                )
+                valid_indices_found += 1
+            else:
+                st.warning(f"Invalid index {idx} found at search result position {i}.")
+    
+    if valid_indices_found == 0:
+        st.warning("Could not find relevant context in the uploaded documents for your query.")
+        return "No relevant context could be retrieved." # Return fallback context
+    return context
+
+def send_message():
+    # Add verbose state check at the beginning
+    # st.write(f"DEBUG: Start send_message. Index ntotal: {getattr(st.session_state.get('faiss_index'), 'ntotal', 'N/A')}, Num docs: {len(st.session_state.get('documents', []))}")
+
+    # Count the number of user messages in chat history
+    user_message_count = sum(
+        1 for msg in st.session_state.chat_history if msg["role"] == "user"
+    )
+    if user_message_count >= 20:
+        st.error(
+            "You have reached the maximum of 20 messages. Please restart your session to talk again."
+        )
+        return
+
+    if client is None:
+        st.error("OpenAI client not initialized. Check secrets configuration.")
+        return
+
+    # Check if index exists and has items *before* trying to use it
+    if (
+        not hasattr(st.session_state, "faiss_index")
+        or st.session_state.faiss_index.ntotal == 0
+    ):
+        st.error("No documents have been uploaded or indexed yet.")
+        st.session_state.chat_history.append(
+            {
+                "role": "assistant",
+                "text": "Please upload documents before asking questions.",
+            }
+        )
+        return
+
+    # Capture input from session state
+    current_input = st.session_state.input_text 
+
+    # Append the user message to the chat history
+    user_message = {"role": "user", "text": current_input}
+    st.session_state.chat_history.append(user_message)
+
+    # --- Handle Meta Question --- 
+    meta_answer = check_and_handle_meta_question(current_input)
+    if meta_answer:
+        st.session_state.chat_history.append({"role": "assistant", "text": meta_answer})
+        st.rerun()
+        return # Exit early
+    # --- End Meta Question Handling ---
+
+    try:
+        # --- Retrieve and Format Context --- 
+        query_embedding = get_embedding(current_input)
+        context = retrieve_and_format_context(query_embedding)
+        # --- End Context Retrieval --- 
+
+        # Construct the prompt
+        prompt = (
+            f"You are comparing information from different documents based *only* on the context provided below. "
+            f"Each context snippet is marked with '--- Context from 'filename': ---'. "
+            f"Answer the user's question based *only* on this structured context. "
+            f"If the context doesn't contain enough information to answer, say so clearly.\n\n"
+            f"Structured Context:\n{context}"
+            f"\n---\nUser Question: {current_input}\nAnswer:"
+        )
+
+        # Call OpenAI's ChatCompletion API
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant answering based *only* on the provided context.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=250,  # Increased slightly
+            temperature=0.1,  # Slightly lower temp
+        )
+        answer = response.choices[0].message.content.strip()
+        st.session_state.chat_history.append({"role": "assistant", "text": answer})
+
+    except Exception as e:
+        st.error("Error during chat processing: " + str(e))
+        st.session_state.chat_history.append(
+            {"role": "assistant", "text": f"An error occurred: {str(e)}"}
+        )
+
+
 # -------------------------------
 # UI: File Upload Section
 # -------------------------------
@@ -204,133 +332,6 @@ st.markdown("### Chat with Your Documents")
 # -------------------------------
 # Chat: Send Message with Limit
 # -------------------------------
-
-
-def send_message():
-    # Add verbose state check at the beginning
-    # st.write(f"DEBUG: Start send_message. Index ntotal: {getattr(st.session_state.get('faiss_index'), 'ntotal', 'N/A')}, Num docs: {len(st.session_state.get('documents', []))}")
-
-    # Count the number of user messages in chat history
-    user_message_count = sum(
-        1 for msg in st.session_state.chat_history if msg["role"] == "user"
-    )
-    if user_message_count >= 20:
-        st.error(
-            "You have reached the maximum of 20 messages. Please restart your session to talk again."
-        )
-        return
-
-    if client is None:
-        st.error("OpenAI client not initialized. Check secrets configuration.")
-        return
-
-    # Check if index exists and has items *before* trying to use it
-    if (
-        not hasattr(st.session_state, "faiss_index")
-        or st.session_state.faiss_index.ntotal == 0
-    ):
-        st.error("No documents have been uploaded or indexed yet.")
-        st.session_state.chat_history.append(
-            {
-                "role": "assistant",
-                "text": "Please upload documents before asking questions.",
-            }
-        )
-        return
-
-    # Capture input from session state (set by form submission)
-    current_input = st.session_state.input_text
-
-    # Append the user message to the chat history
-    user_message = {"role": "user", "text": current_input}
-    st.session_state.chat_history.append(user_message)
-
-    # --- Add Check for Meta Question --- 
-    normalized_input = current_input.lower().strip().replace("?", "") # Normalize
-    # Check for keywords instead of just startswith
-    is_count_query = (
-        ("how many" in normalized_input or "count" in normalized_input) and 
-        ("document" in normalized_input or "file" in normalized_input or "pdf" in normalized_input)
-    )
-
-    if is_count_query:
-        if "documents" in st.session_state and st.session_state.documents:
-            # Calculate unique filenames
-            unique_filenames = set(filename for _, _, filename in st.session_state.documents)
-            num_docs = len(unique_filenames)
-            answer = f"You have successfully processed {num_docs} unique document(s):\n" + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
-        else:
-            answer = "No documents have been successfully processed yet."
-        
-        st.session_state.chat_history.append({"role": "assistant", "text": answer})
-        st.rerun() # Rerun to update the chat display immediately
-        # return # No longer strictly needed due to rerun, but good practice
-    # --- End Check for Meta Question ---
-
-    try:
-        # Retrieve relevant document context using FAISS
-        # st.write(f"DEBUG: Searching index (ntotal={st.session_state.faiss_index.ntotal}) for query: {current_input[:50]}...")
-        query_embedding = get_embedding(current_input)
-        k = min(
-            3, st.session_state.faiss_index.ntotal
-        )  # Don't ask for more docs than exist
-
-        distances, indices = st.session_state.faiss_index.search(
-            np.expand_dims(query_embedding, axis=0), k
-        )
-        # st.write(f"DEBUG: FAISS search returned indices: {indices}, distances: {distances}")
-
-        context = ""
-        valid_indices_found = 0
-        if indices.size > 0:
-            for i, idx in enumerate(indices[0]):
-                if 0 <= idx < len(st.session_state.documents):
-                    # Retrieve chunk text AND filename
-                    chunk_text, _, doc_filename = st.session_state.documents[idx]
-                    # Prepend filename to the context chunk
-                    context += (
-                        f"--- Context from '{doc_filename}': ---\n{chunk_text}\n\n"
-                    )
-                    valid_indices_found += 1
-                else:
-                    st.warning(
-                        f"Invalid index {idx} found at search result position {i}."
-                    )
-
-        if valid_indices_found == 0:
-            st.warning(
-                "Could not find relevant context in the uploaded documents for your query."
-            )
-            context = "No relevant context could be retrieved."  # Add fallback context
-
-        # Construct the prompt - Instruct LLM about the source labels
-        prompt = (
-            f"You are comparing information from different documents based *only* on the context provided below. Each context snippet is marked with '--- Context from 'filename': ---'. Answer the user's question based *only* on this structured context. If the context doesn't contain enough information to answer, say so clearly.\n\n"
-            f"Structured Context:\n{context}\n---\nUser Question: {current_input}\nAnswer:"
-        )
-        # st.write(f"DEBUG: Prompt length: {len(prompt)}") # Check prompt size
-
-        # Call OpenAI's ChatCompletion API
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant answering based *only* on the provided context.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=250,  # Increased slightly
-            temperature=0.1,  # Slightly lower temp
-        )
-        answer = response.choices[0].message.content.strip()
-        st.session_state.chat_history.append({"role": "assistant", "text": answer})
-
-    except Exception as e:
-        st.error("Error during chat processing: " + str(e))
-        st.session_state.chat_history.append(
-            {"role": "assistant", "text": f"An error occurred: {str(e)}"}
-        )
 
 
 # Text input widget using a form
