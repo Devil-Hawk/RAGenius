@@ -38,11 +38,9 @@ jobs:
       - name: Run tests
         run: |
           if [ -d "rag-backend/tests" ]; then
-            echo "Running tests in rag-backend..."
-            # Change directory into rag-backend before running pytest
-            cd rag-backend
-            # Now pytest runs from within rag-backend, so 'from main import app' works
-            pytest tests 
+            echo "Running tests in rag-backend from root..."
+            # Add BOTH root (.) and the source directory (rag-backend) to PYTHONPATH
+            PYTHONPATH=".:rag-backend:$PYTHONPATH" pytest rag-backend/tests
           else
             echo "No backend tests found, skipping."
           fi
