@@ -1,12 +1,12 @@
 import streamlit as st
-import openai
+# import openai  # F401 - Keep commented or remove if truly unused
 from openai import OpenAI
 import faiss
 import numpy as np
 import io
-import toml
+# import toml  # F401 - Keep commented or remove if truly unused
 from PyPDF2 import PdfReader
-import os
+# import os  # F401 - Keep commented or remove if truly unused
 
 # -------------------------------
 # Configuration & Secrets
@@ -14,10 +14,11 @@ import os
 
 st.set_page_config(page_title="PDF IQ Chat", layout="wide")
 
+
 # Load the API key from Streamlit secrets and initialize OpenAI client
 try:
     api_key = st.secrets["openai"]["api_key"]
-    
+
     # Initialize OpenAI client directly with the key
     client = OpenAI(api_key=api_key)
 
@@ -28,6 +29,7 @@ except Exception as e:
     st.error(f"Error initializing OpenAI client from secrets: {str(e)}")
     client = None
 
+
 # -------------------------------
 # Session State Initialization
 # -------------------------------
@@ -37,10 +39,21 @@ if "documents" not in st.session_state:
 if "faiss_index" not in st.session_state:
     embedding_dim = 1536  # Dimension for text-embedding-ada-002
     st.session_state.faiss_index = faiss.IndexFlatL2(embedding_dim)
+# Add a check for consistency, though this shouldn't normally happen
+elif not hasattr(st.session_state.faiss_index, 'ntotal'):
+    st.warning("Re-initializing FAISS index due to unexpected state.")
+    embedding_dim = 1536
+    st.session_state.faiss_index = faiss.IndexFlatL2(embedding_dim)
+    st.session_state.documents = [] # Also clear documents if index is bad
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "input_text" not in st.session_state:
     st.session_state.input_text = ""
+
+# Add a flag to disable button during processing
+if 'processing_upload' not in st.session_state:
+    st.session_state.processing_upload = False
+
 
 # -------------------------------
 # Helper Functions
@@ -54,6 +67,7 @@ def get_embedding(text: str) -> np.ndarray:
     )
     embedding = response.data[0].embedding
     return np.array(embedding, dtype=np.float32)
+
 
 def extract_text(file) -> str:
     """Extract text from a PDF or text file."""
@@ -69,6 +83,32 @@ def extract_text(file) -> str:
         text = content.decode("utf-8")
     return text
 
+
+# -------------------------------
+# Chunking Function
+# -------------------------------
+
+def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 150) -> list[str]:
+    """Splits text into overlapping chunks."""
+    if not isinstance(text, str):
+        return []
+    chunks = []
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        # Move start forward, ensuring overlap and preventing infinite loops
+        next_start = start + chunk_size - chunk_overlap
+        # If overlap is too large or chunk size too small, move forward by chunk size
+        if next_start <= start:
+            next_start = start + chunk_size 
+        start = next_start
+        # No need to break explicitly, the while condition handles the end
+
+    return [chunk for chunk in chunks if chunk.strip()] # Remove empty chunks
+
+
 # -------------------------------
 # UI: File Upload Section
 # -------------------------------
@@ -79,92 +119,207 @@ st.markdown("*(Upload PDFs or text files. The content will be indexed for chat.)
 
 uploaded_files = st.file_uploader("Select files", type=["pdf", "txt"], accept_multiple_files=True)
 
-if st.button("Upload Files"):
+if st.button("Upload Files", disabled=st.session_state.processing_upload):
     if not uploaded_files:
         st.error("No files selected for upload.")
     else:
-        for file in uploaded_files:
-            text = extract_text(file)
-            embedding = get_embedding(text)
-            st.session_state.documents.append((text, embedding))
-            # Add the embedding to the FAISS index
-            st.session_state.faiss_index.add(np.expand_dims(embedding, axis=0))
-        st.success(f"Uploaded {len(uploaded_files)} file(s) successfully.")
+        if client is None:
+            st.error("OpenAI client not initialized. Check secrets configuration.")
+        else:
+            st.session_state.processing_upload = True # Disable button
+            # Store tuples of (chunk_text, embedding, source_filename)
+            new_documents: list[tuple[str, np.ndarray, str]] = []
+            embedding_dim = 1536
+            current_batch_index = faiss.IndexFlatL2(embedding_dim)
+            processing_error = False
+            files_processed_count = 0
+            chunks_processed_count = 0
+            
+            with st.spinner("Extracting text from documents..."):
+                all_chunks_with_source: list[tuple[str, str]] = [] # (chunk, filename)
+                for file in uploaded_files:
+                     # st.write(f"Extracting text from {file.name}...") # Hide this line
+                     full_text = extract_text(file)
+                     if full_text:
+                         file_chunks = chunk_text(full_text)
+                         for chunk in file_chunks:
+                            all_chunks_with_source.append((chunk, file.name))
+                         files_processed_count += 1 
+                     else:
+                         st.warning(f"Skipping file {file.name} due to text extraction issues.", icon="⚠️")
+                
+                if not all_chunks_with_source:
+                    st.error("No text could be extracted or chunked from the selected files.")
+                    processing_error = True
+                # else:
+                     # st.write(f"Generated {len(all_chunks_with_source)} text chunks from {files_processed_count} file(s).") # Hide this line
+
+            if not processing_error and all_chunks_with_source:
+                 # Use a single, generic spinner message for the embedding process
+                 with st.spinner(f"Indexing documents..."): 
+                    try:
+                        # Embed and index each chunk, storing source filename
+                        for i, (chunk, filename) in enumerate(all_chunks_with_source):
+                            embedding = get_embedding(chunk)
+                            new_documents.append((chunk, embedding, filename)) 
+                            current_batch_index.add(np.expand_dims(embedding, axis=0))
+                            chunks_processed_count += 1
+                        
+                        st.success(f"Successfully processed {files_processed_count} file(s) ({chunks_processed_count} sections indexed). Ready for questions!", icon="✅")
+                        # REPLACE existing state only on full success
+                        st.session_state.documents = new_documents 
+                        st.session_state.faiss_index = current_batch_index
+                        st.session_state.chat_history = [] 
+
+                    except Exception as e:
+                        st.error(f"Error during document processing: {str(e)}", icon="🚨")
+                        processing_error = True
+                        
+            elif not all_chunks_with_source and not processing_error: 
+                 st.warning("No text could be processed from the uploaded files.", icon="⚠️")
+                 processing_error = True 
+            
+            # Re-enable button regardless of outcome
+            st.session_state.processing_upload = False
+            # Rerun to clear spinners and update UI state cleanly
+            st.rerun()
 
 st.markdown("---")
 st.markdown("### Chat with Your Documents")
+
 
 # -------------------------------
 # Chat: Send Message with Limit
 # -------------------------------
 
 def send_message():
+    # Add verbose state check at the beginning
+    # st.write(f"DEBUG: Start send_message. Index ntotal: {getattr(st.session_state.get('faiss_index'), 'ntotal', 'N/A')}, Num docs: {len(st.session_state.get('documents', []))}")
+
     # Count the number of user messages in chat history
     user_message_count = sum(1 for msg in st.session_state.chat_history if msg["role"] == "user")
     if user_message_count >= 20:
         st.error("You have reached the maximum of 20 messages. Please restart your session to talk again.")
         return
 
-    if st.session_state.input_text.strip() == "":
-        st.error("Please enter a valid question.")
+    if client is None:
+        st.error("OpenAI client not initialized. Check secrets configuration.")
+        return
+        
+    # Check if index exists and has items *before* trying to use it
+    if not hasattr(st.session_state, 'faiss_index') or st.session_state.faiss_index.ntotal == 0:
+        st.error("No documents have been uploaded or indexed yet.")
+        st.session_state.chat_history.append({"role": "assistant", "text": "Please upload documents before asking questions."}) 
         return
 
+    # Capture input from session state (set by form submission)
+    current_input = st.session_state.input_text 
+
     # Append the user message to the chat history
-    user_message = {"role": "user", "text": st.session_state.input_text}
+    user_message = {"role": "user", "text": current_input}
     st.session_state.chat_history.append(user_message)
 
-    # Retrieve relevant document context using FAISS
-    query_embedding = get_embedding(st.session_state.input_text)
-    k = 3  # Retrieve top 3 documents
-    distances, indices = st.session_state.faiss_index.search(np.expand_dims(query_embedding, axis=0), k)
-    context = ""
-    for idx in indices[0]:
-        if idx < len(st.session_state.documents):
-            context += st.session_state.documents[idx][0] + "\n"
+    # --- Add Check for Meta Question --- 
+    normalized_input = current_input.lower().strip()
+    if normalized_input.startswith("how many document") or normalized_input.startswith("count document") or normalized_input.startswith("how many file"):
+        if "documents" in st.session_state and st.session_state.documents:
+            # Calculate unique filenames
+            unique_filenames = set(filename for _, _, filename in st.session_state.documents)
+            num_docs = len(unique_filenames)
+            answer = f"You have uploaded {num_docs} unique document(s):\n" + "\n".join(f"- {name}" for name in sorted(list(unique_filenames)))
+        else:
+            answer = "No documents have been successfully processed yet."
+        
+        st.session_state.chat_history.append({"role": "assistant", "text": answer})
+        return # <<-- Exit early, skip RAG
+    # --- End Check for Meta Question ---
 
-    # Construct the prompt
-    prompt = (
-        "Answer the question based on the context below.\n\n"
-        f"Context:\n{context}\n"
-        f"Question: {st.session_state.input_text}\nAnswer:"
-    )
-
-    # Clear the input field
-    st.session_state.input_text = ""
-    
     try:
+        # Retrieve relevant document context using FAISS
+        # st.write(f"DEBUG: Searching index (ntotal={st.session_state.faiss_index.ntotal}) for query: {current_input[:50]}...")
+        query_embedding = get_embedding(current_input)
+        k = min(3, st.session_state.faiss_index.ntotal) # Don't ask for more docs than exist
+        
+        distances, indices = st.session_state.faiss_index.search(np.expand_dims(query_embedding, axis=0), k)
+        # st.write(f"DEBUG: FAISS search returned indices: {indices}, distances: {distances}")
+        
+        context = ""
+        valid_indices_found = 0
+        if indices.size > 0:
+            for i, idx in enumerate(indices[0]):
+                if 0 <= idx < len(st.session_state.documents):
+                    # Retrieve chunk text AND filename
+                    chunk_text, _, doc_filename = st.session_state.documents[idx]
+                    # Prepend filename to the context chunk
+                    context += f"--- Context from '{doc_filename}': ---\n{chunk_text}\n\n"
+                    valid_indices_found += 1
+                else:
+                    st.warning(f"Invalid index {idx} found at search result position {i}.")
+        
+        if valid_indices_found == 0:
+             st.warning("Could not find relevant context in the uploaded documents for your query.")
+             context = "No relevant context could be retrieved." # Add fallback context
+
+        # Construct the prompt - Instruct LLM about the source labels
+        prompt = (
+            f"You are comparing information from different documents based *only* on the context provided below. Each context snippet is marked with '--- Context from 'filename': ---'. Answer the user's question based *only* on this structured context. If the context doesn't contain enough information to answer, say so clearly.\n\n" \
+            f"Structured Context:\n{context}\n---\nUser Question: {current_input}\nAnswer:"
+        )
+        # st.write(f"DEBUG: Prompt length: {len(prompt)}") # Check prompt size
+
         # Call OpenAI's ChatCompletion API
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": "You are a helpful assistant answering based *only* on the provided context."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=200,
-            temperature=0.2
+            max_tokens=250, # Increased slightly
+            temperature=0.1 # Slightly lower temp
         )
         answer = response.choices[0].message.content.strip()
         st.session_state.chat_history.append({"role": "assistant", "text": answer})
-    except Exception as e:
-        st.error("Error: " + str(e))
 
-# Text input widget for user messages
-st.text_input("Type your question:", key="input_text", on_change=send_message)
+    except Exception as e:
+        st.error("Error during chat processing: " + str(e))
+        st.session_state.chat_history.append({"role": "assistant", "text": f"An error occurred: {str(e)}"})
+
+
+# Text input widget using a form
+with st.form(key='chat_form', clear_on_submit=True):
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        # Text input bound to session state, but NO on_change here
+        st.text_input("Type your question:", key="input_text", label_visibility="collapsed")
+    with col2:
+        # The submit button for the form
+        submitted = st.form_submit_button("Send")
+    
+    # Code here runs ONLY when the submit button is clicked
+    if submitted:
+        # Check if there's text in the state (captured by the form)
+        if st.session_state.input_text and st.session_state.input_text.strip():
+            send_message() # Call send_message only on valid submission
+        else:
+            st.error("Please enter a question before sending.")
+            # No need to call send_message if input is empty
+
 
 # -------------------------------
 # Display Chat History
 # -------------------------------
 
 st.markdown("#### Conversation")
-for msg in st.session_state.chat_history:
+for msg in reversed(st.session_state.chat_history):
     if msg["role"] == "user":
         st.markdown(
             f"<div style='text-align: right; color: lightblue;'><strong>You:</strong> {msg['text']}</div>",
             unsafe_allow_html=True
         )
-    else:
+    else: # Assistant or Error message
+        color = "lightcoral" if "error occurred" in msg['text'].lower() else "lightgreen"
         st.markdown(
-            f"<div style='text-align: left; color: lightgreen;'><strong>Assistant:</strong> {msg['text']}</div>",
+            f"<div style='text-align: left; color: {color};'><strong>Assistant:</strong> {msg['text']}</div>",
             unsafe_allow_html=True
         )
     

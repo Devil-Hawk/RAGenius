@@ -1,13 +1,13 @@
 import os
 import io
 import time
-import toml  # pip install toml
+import toml
 from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import openai
-from openai import OpenAI  # Add this import
+# import openai  # F401 - Keep commented or remove if truly unused
+from openai import OpenAI
 import faiss
 import numpy as np
 import uvicorn
